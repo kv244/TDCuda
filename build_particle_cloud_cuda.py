@@ -32,8 +32,9 @@ SWIRL         = 1.4
 DAMPING       = 0.985
 TURBULENCE    = 0.4
 
-SPRITE_SIZE   = 0.13           # world-space size of each sprite
-CAM_DIST      = 22.0
+SPRITE_SIZE   = 0.10           # world-space size of each sprite
+GLOW          = 0.06           # per-particle intensity (additive accumulates it)
+CAM_DIST      = 38.0           # pulled back so the cloud reads as a glowing orb
 NEON_RGB      = (0.0, 0.92, 1.0)
 BLOOM_SIZE    = 10.0
 
@@ -64,7 +65,7 @@ void main()
 """
 
 PIXEL_SHADER = """
-uniform vec4 uColor;       // .rgb = particle color
+uniform vec4 uColor;       // .rgb = particle color, .a = glow intensity
 out vec4 fragColor;
 in vec2 vUV;
 
@@ -73,8 +74,8 @@ void main()
     vec2 d = vUV * 2.0 - 1.0;          // round, soft-edged sprite
     float r2 = dot(d, d);
     if (r2 > 1.0) discard;
-    float alpha = smoothstep(1.0, 0.0, r2);
-    fragColor = TDOutputSwizzle(vec4(uColor.rgb * alpha, alpha));
+    float a = smoothstep(1.0, 0.0, r2) * uColor.a;   // dim per particle so
+    fragColor = TDOutputSwizzle(vec4(uColor.rgb * a, a));  // additive accumulates
 }
 """
 
@@ -108,13 +109,14 @@ def _expose(box, cuda, geo, mat, cam, blur):
     col = pg.appendRGB('Color')
     col[0].val, col[1].val, col[2].val = NEON_RGB
     pg.appendFloat('Spritesize', label='Sprite Size')[0].val    = SPRITE_SIZE
+    pg.appendFloat('Glow',       label='Glow Intensity')[0].val = GLOW
     pg.appendFloat('Camdist',    label='Camera Distance')[0].val = CAM_DIST
     pg.appendFloat('Bloom')[0].val                               = BLOOM_SIZE
 
     # nice slider ranges
     ranges = {'Count': (1024, 1048576), 'Radius': (0.1, 50), 'Speed': (0, 5),
               'Gravity': (0, 5), 'Swirl': (0, 8), 'Damping': (0.9, 1.0),
-              'Turbulence': (0, 5), 'Spritesize': (0.01, 1.0),
+              'Turbulence': (0, 5), 'Spritesize': (0.01, 1.0), 'Glow': (0, 1),
               'Camdist': (2, 80), 'Bloom': (0, 30)}
     for nm, (lo, hi) in ranges.items():
         p = getattr(box.par, nm)
@@ -136,10 +138,10 @@ def _expose(box, cuda, geo, mat, cam, blur):
 
     # GLSL uniforms: uColor (vec0), uSprite (vec1), bound to the look controls
     mat.par.vec0name = 'uColor'
-    mat.par.vec0valuew = 1.0
     bind(mat, 'vec0valuex', 'Colorr')
     bind(mat, 'vec0valuey', 'Colorg')
     bind(mat, 'vec0valuez', 'Colorb')
+    bind(mat, 'vec0valuew', 'Glow')    # per-particle intensity
     mat.par.vec1name = 'uSprite'
     bind(mat, 'vec1valuex', 'Spritesize')
 
@@ -189,6 +191,14 @@ def build():
     _set_first(mat, ['pdat', 'pixeldat'],  pdat.name, 'pixel shader DAT')
     _set_first(mat, ['sampler0name', 'sampler1name'], 'sPos', 'sampler name')
     _set_first(mat, ['sampler0top',  'sampler1top'],  cuda.path, 'sampler TOP')
+    # Additive blending: overlapping sprites accumulate into a bright neon core
+    # (the pixel shader outputs premultiplied colour, so src=one, dst=one adds
+    # colour*alpha). Depth writing off so particles never occlude each other.
+    _set_first(mat, ['blending'],     True,  'enable blending')
+    _set_first(mat, ['blendop'],      'add', 'blend operation')
+    _set_first(mat, ['srcblend'],     'one', 'source blend factor')
+    _set_first(mat, ['destblend'],    'one', 'dest blend factor')
+    _set_first(mat, ['depthwriting'], False, 'disable depth writing')
 
     # --- geometry: a unit quad, instanced N times as billboards -------------
     geo = box.create(geometryCOMP, 'cloud')
@@ -214,7 +224,7 @@ def build():
     cam = box.create(cameraCOMP, 'cam1')
     cam.nodeX, cam.nodeY = 450, 200
     cam.par.tz = CAM_DIST
-    cam.par.rx = -8
+    cam.par.rx = 0
 
     light = box.create(lightCOMP, 'light1')
     light.nodeX, light.nodeY = 450, 350

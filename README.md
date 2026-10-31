@@ -2,6 +2,8 @@
 
 ![Compile](https://github.com/kv244/TDCuda/actions/workflows/compile.yml/badge.svg)
 
+![Neon CUDA particle cloud](docs/particle_cloud.jpg)
+
 A GPU-resident 3D particle cloud for [TouchDesigner](https://derivative.ca),
 driven by a custom **CUDA** operator. The simulation runs as a CUDA kernel
 with persistent position **and velocity** buffers (a stateful force-field /
@@ -35,6 +37,7 @@ tiling / Barnes-Hut and is a natural next step.
 | `CMakeLists.txt` | Build configuration. Targets `sm_89` (RTX 40-series / Ada) with fast-math. |
 | `build.bat` | One-click Windows build (selects CUDA 12.8 + the TD headers). |
 | `build_particle_cloud_cuda.py` | Builds the whole TD network (CUDA TOP, GLSL material, geometry, camera, bloom) and exposes its controls, when run inside TouchDesigner. |
+| `ParticleCloudCUDA.tox` | Prebuilt component — drag into any project, then point the inner CUDA TOP's Plugin Path at your built DLL. |
 | `.github/workflows/compile.yml` | CI that compiles the operator on every push (drives the badge above). |
 
 ## Prerequisites (local build, Windows)
@@ -120,6 +123,9 @@ To build the complete, pre-wired, GUI-controllable component:
    **Run Script**.
 4. Open `/particle_cloud_cuda` and view the `out` TOP.
 
+Or skip the script: drag **`ParticleCloudCUDA.tox`** into your network and set
+the inner `cuda_particles` TOP's **Plugin Path** to your built DLL.
+
 ## Controls
 
 Running the builder adds a **“Particle Cloud”** custom parameter page to the
@@ -139,6 +145,7 @@ control is bound to the operator it drives:
 | **Reset** | CUDA TOP (pulse) | Re-seed positions and velocities. |
 | **Color** | GLSL `uColor` | Particle color (RGB). |
 | **Sprite Size** | GLSL `uSprite` | World-space size of each billboard. |
+| **Glow Intensity** | GLSL `uColor.a` | Per-particle brightness; additive blending accumulates it into a bright core. |
 | **Camera Distance** | Camera `tz` | Pull the camera in/out. |
 | **Bloom** | Blur size | Strength of the neon glow. |
 
