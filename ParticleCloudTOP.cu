@@ -243,14 +243,33 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// Set the plugin API version across TouchDesigner header revisions.
+// Newer headers (2025.x) make TOP_PluginInfo::apiVersion private and expose
+// setAPIVersion(); older public headers (CustomOperatorSamples) expose a
+// public apiVersion member to assign directly. SFINAE picks whichever exists:
+// the (…, int) overload is preferred and only compiles when setAPIVersion is
+// available; otherwise the (…, long) overload assigns apiVersion directly.
+// ---------------------------------------------------------------------------
+template <typename T>
+static auto tdSetAPIVersion(T* info, int)
+    -> decltype(info->setAPIVersion(TOPCPlusPlusAPIVersion), void())
+{
+    info->setAPIVersion(TOPCPlusPlusAPIVersion);
+}
+template <typename T>
+static void tdSetAPIVersion(T* info, long)
+{
+    info->apiVersion = TOPCPlusPlusAPIVersion;
+}
+
+// ---------------------------------------------------------------------------
 // Plugin entry points
 // ---------------------------------------------------------------------------
 extern "C"
 {
     DLLEXPORT void FillTOPPluginInfo(TOP_PluginInfo* info)
     {
-        if (!info->setAPIVersion(TOPCPlusPlusAPIVersion))
-            return;
+        tdSetAPIVersion(info, 0);   // works on both old and new TD headers
         info->executeMode = TOP_ExecuteMode::CUDA;
 
         OP_CustomOPInfo& c = info->customOPInfo;
