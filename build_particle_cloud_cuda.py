@@ -145,6 +145,10 @@ def build():
     _set_first(rect, ['sizex'], 1.0, 'rect size x')
     _set_first(rect, ['sizey'], 1.0, 'rect size y')
     _set_first(rect, ['orient', 'orientation'], 'xy', 'rect orientation')
+    # The geometry COMP only renders child SOPs whose render/display flags are
+    # on; a freshly created SOP has them OFF, so set them explicitly.
+    rect.render = True
+    rect.display = True
 
     geo.par.instancing = True
     _set_first(geo, ['instancecountmode'], 'manual', 'instance count mode')
