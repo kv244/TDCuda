@@ -17,7 +17,7 @@ billboard sprite. Nothing round-trips through the CPU.
    position texture ──────────────┐  bound as sampler 'sPos'
                                    ▼
    GLSL MAT vertex shader: texelFetch(TDInstanceID()) places one
-   instanced billboard quad per particle, sized in the shader
+   instanced billboard quad per particle, sized by uSprite, tinted by uColor
         │
         ▼
    Render TOP ──▶ Blur ──▶ additive Composite (bloom) ──▶ out
@@ -34,7 +34,7 @@ tiling / Barnes-Hut and is a natural next step.
 | `ParticleCloudTOP.cu` | The custom operator: CUDA kernels (init + integrate) and the TouchDesigner `CPlusPlus TOP` plugin glue. |
 | `CMakeLists.txt` | Build configuration. Targets `sm_89` (RTX 40-series / Ada) with fast-math. |
 | `build.bat` | One-click Windows build (selects CUDA 12.8 + the TD headers). |
-| `build_particle_cloud_cuda.py` | Builds the whole TD network (CUDA TOP, GLSL material, geometry, camera, bloom) when run inside TouchDesigner. |
+| `build_particle_cloud_cuda.py` | Builds the whole TD network (CUDA TOP, GLSL material, geometry, camera, bloom) and exposes its controls, when run inside TouchDesigner. |
 | `.github/workflows/compile.yml` | CI that compiles the operator on every push (drives the badge above). |
 
 ## Prerequisites (local build, Windows)
@@ -70,11 +70,49 @@ cmake --build build --config Release
 Output: `build/Release/ParticleCloudTOP.dll` (VS) or
 `build/ParticleCloudTOP.dll` (Ninja).
 
-> **Note on the host compiler:** recent MSVC toolsets are newer than older
-> CUDA toolkits officially list. The `-allow-unsupported-compiler` flag (already
-> in `CMakeLists.txt`) relaxes that gate; CUDA 12.8 + VS 2022 compiles cleanly.
+> **Host compiler note:** recent MSVC toolsets are newer than older CUDA
+> toolkits officially list. The `-allow-unsupported-compiler` flag (already in
+> `CMakeLists.txt`) relaxes that gate; CUDA 12.8 + VS 2022 compiles cleanly.
 
-## Run in TouchDesigner
+## Installing and using the operator (it is a **TOP**)
+
+`ParticleCloudTOP` is a **TOP**: it outputs a 2D `RGBA32F` texture that is a
+*data buffer*, not a picture — each texel holds one particle's
+`(x, y, z, life)`. You don't view it directly; you feed it to a GLSL material
+that instances geometry (the builder below wires this up for you). There are
+two ways to load the DLL.
+
+### A. As a CPlusPlus TOP (plugin path) — no install
+
+This is what `build_particle_cloud_cuda.py` does, and the quickest way to try
+it:
+
+1. Create a **CPlusPlus TOP**.
+2. Set its **Plugin Path** parameter to your built `ParticleCloudTOP.dll`.
+3. Custom parameters (Count, Radius, Gravity, …) appear on the TOP's
+   **Custom** page.
+
+### B. As an installed Custom Operator — a native TOP in the OP menu
+
+Because the plugin declares an op type, you can drop the DLL into a **Plugins
+folder** and TouchDesigner will load it at startup as a first-class operator:
+
+1. Copy `ParticleCloudTOP.dll` into one of TD's plugin search folders:
+   - `…/<the folder next to your .toe>/Plugins/`, or
+   - `%USERPROFILE%/Documents/Derivative/Plugins/` (all projects), or
+   - any folder listed in the `TOUCH_PLUGIN_PATH` environment variable.
+2. Restart TouchDesigner.
+3. In a network press **Tab** → **TOP** → **Custom** category → **“Particle
+   Cloud CUDA”** (op type `particlecloudcuda`). The first time, TD asks you to
+   confirm loading a third-party binary.
+
+> The DLL must be built against the **same CUDA major version** as the target
+> TouchDesigner (12.x for 2025.x) and against the TD C++ API (2022.20000+
+> headers). A mismatch shows up as "loads but won't cook."
+
+## Run the full component in TouchDesigner
+
+To build the complete, pre-wired, GUI-controllable component:
 
 1. Build the DLL (above).
 2. Open `build_particle_cloud_cuda.py` and set `DLL_PATH` to your built DLL.
@@ -82,28 +120,42 @@ Output: `build/Release/ParticleCloudTOP.dll` (VS) or
    **Run Script**.
 4. Open `/particle_cloud_cuda` and view the `out` TOP.
 
-## Parameters
+## Controls
 
-On the `cuda_particles` TOP (the simulation):
+Running the builder adds a **“Particle Cloud”** custom parameter page to the
+`/particle_cloud_cuda` COMP, so the whole thing is controllable from the
+component's parameter dialog (and bindable/keyframable at runtime). Each
+control is bound to the operator it drives:
 
-| Parameter | Meaning |
-|-----------|---------|
-| **Particle Count** | Number of particles (buffers reallocate on change). |
-| **Cloud Radius** | Size of the initial gaussian blob. |
-| **Speed** | Time-step multiplier for the integration. |
-| **Gravity Well** | Central spring pulling particles toward the origin. |
-| **Swirl** | Tangential force — orbital motion around the Y axis. |
-| **Damping** | Velocity retained per frame (lower = more drag). |
-| **Turbulence** | Strength of the sinusoidal flow field. |
-| **Reset** | Pulse — re-seed positions and velocities. |
+| Parameter | Drives | Meaning |
+|-----------|--------|---------|
+| **Particle Count** | CUDA TOP + instance count | Number of particles (buffers reallocate on change). |
+| **Cloud Radius** | CUDA TOP | Size of the initial gaussian blob. |
+| **Speed** | CUDA TOP | Time-step multiplier for the integration. |
+| **Gravity Well** | CUDA TOP | Central spring pulling particles toward the origin. |
+| **Swirl** | CUDA TOP | Tangential force — orbital motion around Y. |
+| **Damping** | CUDA TOP | Velocity retained per frame (lower = more drag). |
+| **Turbulence** | CUDA TOP | Strength of the sinusoidal flow field. |
+| **Reset** | CUDA TOP (pulse) | Re-seed positions and velocities. |
+| **Color** | GLSL `uColor` | Particle color (RGB). |
+| **Sprite Size** | GLSL `uSprite` | World-space size of each billboard. |
+| **Camera Distance** | Camera `tz` | Pull the camera in/out. |
+| **Bloom** | Blur size | Strength of the neon glow. |
 
-Render-side constants (sprite size, camera distance, colour, bloom, count)
-live at the top of `build_particle_cloud_cuda.py`.
+(The CUDA TOP keeps its own Custom page too, if you load it standalone via
+method A/B above.)
+
+## Continuous integration
+
+`.github/workflows/compile.yml` compiles the operator on every push using a
+Windows runner: it installs a CUDA 12.x toolkit, fetches the TD C++ API
+headers from Derivative's public **CustomOperatorSamples** repo, and builds
+with CMake + Ninja. The badge at the top reflects the latest run.
 
 ## Roadmap
 
 - True GL point sprites for 1M+ particles (billboards are the robust default).
-- Per-particle colour by speed / age via extra texture channels.
+- Per-particle color by speed / age via extra texture channels.
 - All-pairs or Barnes-Hut gravity for real N-body behaviour.
 
 ## License

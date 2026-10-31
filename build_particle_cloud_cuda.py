@@ -1,52 +1,52 @@
 """
-build_particle_cloud_cuda.py  --  billboard-sprite + stateful-sim version
+build_particle_cloud_cuda.py  --  billboard sprites + stateful sim + exposed UI
 =======================================================================
-Builds the CUDA particle cloud in TouchDesigner.
+Builds the CUDA particle cloud in TouchDesigner as a self-contained,
+GUI-controllable component.
 
 ParticleCloudTOP.dll (CUDA, stateful) integrates position+velocity every
 frame and outputs an RGBA32F position texture. A GLSL MAT reads that texture
 in the vertex shader (texelFetch by TDInstanceID) and draws each particle as
 a small camera-facing QUAD (billboard) sized in the vertex shader. Two
-triangles per particle is far lighter than instancing sphere geometry, so
-counts scale into the hundreds of thousands on a 4070, while rendering
-reliably (no reliance on GL program-point-size).
+triangles per particle scales to hundreds of thousands of particles.
+
+The /particle_cloud_cuda COMP gets its own Custom Parameter page ("Particle
+Cloud"), so every control is adjustable from the component's parameter dialog
+at runtime. The sim params bind to the CUDA TOP, camera/bloom bind to those
+operators, and Color/Sprite Size drive GLSL uniforms (uColor / uSprite).
 
 RUN: paste into a Text DAT -> right-click -> Run Script. View the 'out' TOP.
 Re-running rebuilds /particle_cloud_cuda cleanly.
 """
 
 # ----------------------------------------------------------------------
-# CONFIG
+# CONFIG  (these become the DEFAULTS of the component's custom parameters)
 # ----------------------------------------------------------------------
 DLL_PATH      = r"C:/Users/julia/Downloads/TDClaude/build/Release/ParticleCloudTOP.dll"
 
-NUM_PARTICLES = 200000         # billboards are cheap -> push this high. Keep == TOP's Count.
+NUM_PARTICLES = 200000         # billboards are cheap -> push this high
 CLOUD_RADIUS  = 6.0
 SIM_SPEED     = 1.0
-GRAVITY       = 0.8            # central well strength
-SWIRL         = 1.4           # tangential spin
-DAMPING       = 0.985         # velocity retention / frame
+GRAVITY       = 0.8
+SWIRL         = 1.4
+DAMPING       = 0.985
 TURBULENCE    = 0.4
 
-SPRITE_SIZE   = 0.13          # world-space size of each square sprite
-CAM_DIST      = 22.0          # pulled back so the cloud reads as a volume
+SPRITE_SIZE   = 0.13           # world-space size of each sprite
+CAM_DIST      = 22.0
 NEON_RGB      = (0.0, 0.92, 1.0)
 BLOOM_SIZE    = 10.0
 
 CONTAINER_NAME = "particle_cloud_cuda"
 
 # ----------------------------------------------------------------------
-# SHADERS  (tokens __SPRITE__ / __R__ __G__ __B__ are replaced, to avoid
-#           GLSL-brace collisions with str.format)
-#
-# The quad's local vertex P spans [-0.5, 0.5] (Rectangle SOP, size 1). We
-# scale it to SPRITE_SIZE and translate it to the particle's world position
-# read from the CUDA texture. Because we only TRANSLATE the quad (never rotate
-# it), it stays in the XY plane and faces the +Z-looking camera -- a cheap,
-# robust billboard for this fixed front view.
+# SHADERS  (color + sprite size come from GLSL uniforms so they are
+#           controllable at runtime; uColor.rgb and uSprite.x are fed by
+#           the GLSL MAT's vector uniforms, bound to the component params)
 # ----------------------------------------------------------------------
 VERTEX_SHADER = """
 uniform sampler2D sPos;
+uniform vec4 uSprite;      // .x = world-space sprite size
 out vec2 vUV;
 
 void main()
@@ -56,27 +56,25 @@ void main()
     ivec2 t = ivec2(id % w, id / w);
     vec3 particlePos = texelFetch(sPos, t, 0).xyz;
 
-    vUV = P.xy + 0.5;                 // 0..1 across the sprite quad
-    vec3 local = P * __SPRITE__;      // scale local quad to world sprite size
+    vUV = P.xy + 0.5;                  // 0..1 across the sprite quad
+    vec3 local = P * uSprite.x;        // scale local quad to world size
     vec4 world = TDDeform(vec4(local + particlePos, 1.0));
     gl_Position = TDWorldToProj(world);
 }
 """
 
 PIXEL_SHADER = """
+uniform vec4 uColor;       // .rgb = particle color
 out vec4 fragColor;
 in vec2 vUV;
 
 void main()
 {
-    // round, soft-edged sprite from the quad's UV
-    vec2 d = vUV * 2.0 - 1.0;
+    vec2 d = vUV * 2.0 - 1.0;          // round, soft-edged sprite
     float r2 = dot(d, d);
     if (r2 > 1.0) discard;
     float alpha = smoothstep(1.0, 0.0, r2);
-
-    vec3 col = vec3(__R__, __G__, __B__);
-    fragColor = TDOutputSwizzle(vec4(col * alpha, alpha));
+    fragColor = TDOutputSwizzle(vec4(uColor.rgb * alpha, alpha));
 }
 """
 
@@ -90,6 +88,73 @@ def _set_first(owner, names, value, what):
                 print(f"[cuda cloud] note: {what} via '{n}' failed ({e})")
     print(f"[cuda cloud] note: none of {names} found for {what}")
     return False
+
+
+def _expose(box, cuda, geo, mat, cam, blur):
+    """Add a Custom Parameter page to the COMP and wire every control to it."""
+    pg = box.appendCustomPage('Particle Cloud')
+
+    # --- simulation controls (bind -> CUDA TOP) ---
+    pg.appendInt('Count',      label='Particle Count')[0].val = NUM_PARTICLES
+    pg.appendFloat('Radius',   label='Cloud Radius')[0].val   = CLOUD_RADIUS
+    pg.appendFloat('Speed')[0].val                            = SIM_SPEED
+    pg.appendFloat('Gravity',  label='Gravity Well')[0].val   = GRAVITY
+    pg.appendFloat('Swirl')[0].val                            = SWIRL
+    pg.appendFloat('Damping')[0].val                          = DAMPING
+    pg.appendFloat('Turbulence')[0].val                       = TURBULENCE
+    pg.appendPulse('Reset')
+
+    # --- look controls ---
+    col = pg.appendRGB('Color')
+    col[0].val, col[1].val, col[2].val = NEON_RGB
+    pg.appendFloat('Spritesize', label='Sprite Size')[0].val    = SPRITE_SIZE
+    pg.appendFloat('Camdist',    label='Camera Distance')[0].val = CAM_DIST
+    pg.appendFloat('Bloom')[0].val                               = BLOOM_SIZE
+
+    # nice slider ranges
+    ranges = {'Count': (1024, 1048576), 'Radius': (0.1, 50), 'Speed': (0, 5),
+              'Gravity': (0, 5), 'Swirl': (0, 8), 'Damping': (0.9, 1.0),
+              'Turbulence': (0, 5), 'Spritesize': (0.01, 1.0),
+              'Camdist': (2, 80), 'Bloom': (0, 30)}
+    for nm, (lo, hi) in ranges.items():
+        p = getattr(box.par, nm)
+        p.normMin, p.normMax = lo, hi
+
+    def bind(target_op, par_name, comp_par):
+        pr = getattr(target_op.par, par_name)
+        pr.mode = ParMode.BIND
+        pr.bindExpr = "parent().par.%s" % comp_par
+
+    # simulation params -> CUDA TOP
+    for nm in ('Count', 'Radius', 'Speed', 'Gravity', 'Swirl', 'Damping', 'Turbulence'):
+        bind(cuda, nm, nm)
+    # keep the rendered instance count in sync with the particle count
+    bind(geo, 'numinstances', 'Count')
+    # camera distance + bloom size
+    bind(cam, 'tz', 'Camdist')
+    bind(blur, 'size', 'Bloom')
+
+    # GLSL uniforms: uColor (vec0), uSprite (vec1), bound to the look controls
+    mat.par.vec0name = 'uColor'
+    mat.par.vec0valuew = 1.0
+    bind(mat, 'vec0valuex', 'Colorr')
+    bind(mat, 'vec0valuey', 'Colorg')
+    bind(mat, 'vec0valuez', 'Colorb')
+    mat.par.vec1name = 'uSprite'
+    bind(mat, 'vec1valuex', 'Spritesize')
+
+    # Reset pulse -> re-seed the sim (relay to the CUDA TOP's Reset pulse)
+    pex = box.create(parameterexecuteDAT, 'reset_exec')
+    pex.nodeX, pex.nodeY = 0, 400
+    pex.par.executeloc = 'op'
+    pex.par.op = '..'
+    pex.par.pars = 'Reset'
+    pex.par.onpulse = True
+    pex.par.valuechange = False
+    pex.text = ("# Relay the component's Reset pulse to the CUDA sim.\n"
+                "def onPulse(par):\n"
+                "    op('cuda_particles').par.Reset.pulse()\n"
+                "    return\n")
 
 
 def build():
@@ -108,24 +173,14 @@ def build():
         cuda.cook(force=True)
     except Exception:
         pass
-    for name, val in (('Count', NUM_PARTICLES), ('Radius', CLOUD_RADIUS),
-                      ('Speed', SIM_SPEED), ('Gravity', GRAVITY),
-                      ('Swirl', SWIRL), ('Damping', DAMPING),
-                      ('Turbulence', TURBULENCE)):
-        if hasattr(cuda.par, name):
-            setattr(cuda.par, name, val)
-        else:
-            print(f"[cuda cloud] note: TOP param '{name}' not present yet")
 
     # --- shaders ------------------------------------------------------------
     vdat = box.create(textDAT, 'vertex_shader')
-    vdat.text = VERTEX_SHADER.replace('__SPRITE__', f'{SPRITE_SIZE:.4f}')
+    vdat.text = VERTEX_SHADER
     vdat.nodeX, vdat.nodeY = 0, 250
 
     pdat = box.create(textDAT, 'pixel_shader')
-    pdat.text = (PIXEL_SHADER.replace('__R__', f'{NEON_RGB[0]:.4f}')
-                             .replace('__G__', f'{NEON_RGB[1]:.4f}')
-                             .replace('__B__', f'{NEON_RGB[2]:.4f}'))
+    pdat.text = PIXEL_SHADER
     pdat.nodeX, pdat.nodeY = 0, 150
 
     mat = box.create(glslMAT, 'particle_mat')
@@ -145,8 +200,8 @@ def build():
     _set_first(rect, ['sizex'], 1.0, 'rect size x')
     _set_first(rect, ['sizey'], 1.0, 'rect size y')
     _set_first(rect, ['orient', 'orientation'], 'xy', 'rect orientation')
-    # The geometry COMP only renders child SOPs whose render/display flags are
-    # on; a freshly created SOP has them OFF, so set them explicitly.
+    # A freshly created SOP has render/display OFF, so the geometry COMP would
+    # draw nothing; enable them explicitly.
     rect.render = True
     rect.display = True
 
@@ -154,7 +209,6 @@ def build():
     _set_first(geo, ['instancecountmode'], 'manual', 'instance count mode')
     geo.par.numinstances = NUM_PARTICLES
     geo.par.material = mat.path
-    # the sim provides all the motion; no whole-cloud auto-rotate
 
     # --- camera + light -----------------------------------------------------
     cam = box.create(cameraCOMP, 'cam1')
@@ -191,8 +245,11 @@ def build():
     out.inputConnectors[0].connect(comp)
     out.viewer = True
 
-    print(f"[cuda cloud] built /{CONTAINER_NAME} ({NUM_PARTICLES} particles, "
-          f"stateful sim + billboard sprites). View the 'out' TOP.")
+    # --- expose all controls on the COMP's own parameter page ---------------
+    _expose(box, cuda, geo, mat, cam, blur)
+
+    print(f"[cuda cloud] built /{CONTAINER_NAME} ({NUM_PARTICLES} particles). "
+          f"Controls are on the COMP's 'Particle Cloud' parameter page.")
     return box
 
 
