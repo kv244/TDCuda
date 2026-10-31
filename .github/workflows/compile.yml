@@ -1,0 +1,79 @@
+name: Compile
+
+# Compiles the CUDA custom operator on every push / PR. The badge in README.md
+# reflects the latest run of this workflow on the default branch.
+#
+# The TouchDesigner C++ API headers are proprietary and NOT committed here, so
+# CI fetches them from Derivative's public CustomOperatorSamples repository and
+# points the build at whatever folder contains TOP_CPlusPlusBase.h.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install CUDA Toolkit (12.x)
+        uses: Jimver/cuda-toolkit@v0.2.24
+        id: cuda-toolkit
+        with:
+          cuda: '12.6.2'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart"]'
+
+      - name: Report toolchain
+        shell: pwsh
+        run: |
+          nvcc --version
+          cmake --version
+          ninja --version
+
+      - name: Fetch TouchDesigner C++ API headers
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/TouchDesigner/CustomOperatorSamples.git tdsamples
+          $hdr = Get-ChildItem -Path tdsamples -Recurse -Filter TOP_CPlusPlusBase.h |
+                 Select-Object -First 1
+          if (-not $hdr) { Write-Error "TOP_CPlusPlusBase.h not found in CustomOperatorSamples"; exit 1 }
+          $dir = $hdr.Directory.FullName
+          Write-Host "TD headers at: $dir"
+          "TD_INCLUDE=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Configure (CMake + Ninja)
+        shell: pwsh
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH" `
+            -DTD_INCLUDE="$env:TD_INCLUDE"
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release
+
+      - name: Verify the DLL was produced
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Path build -Recurse -Filter ParticleCloudTOP.dll |
+                 Select-Object -First 1
+          if (-not $dll) { Write-Error "ParticleCloudTOP.dll was not built"; exit 1 }
+          Write-Host "Built: $($dll.FullName)  ($([math]::Round($dll.Length/1KB)) KB)"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ParticleCloudTOP
+          path: build/**/ParticleCloudTOP.dll
+          if-no-files-found: error

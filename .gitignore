@@ -1,0 +1,25 @@
+# Build output
+build/
+*.dll
+*.lib
+*.exp
+*.obj
+*.pdb
+*.ilk
+
+# TouchDesigner
+*.toe
+*.toe.*
+
+# Local scratch / diagnostics (not part of the project)
+diag.py
+diag.txt
+*_preview.png
+list_cuda.ps1
+nvcctest.bat
+
+# Editor / OS
+.vs/
+.vscode/
+Thumbs.db
+desktop.ini
