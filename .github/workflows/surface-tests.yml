@@ -1,0 +1,35 @@
+# Surface pipeline tests (Linux, no GPU, no TouchDesigner needed).
+# Runs the SurfaceMesher unit/integration suite (incl. a CPU port of the
+# ParticleDensityTOP kernels), the same suite under ASan + UBSan, and a compile
+# of the SOP glue against the stub headers in both output modes. The CUDA DLLs
+# are still built by compile.yml on Windows.
+name: Surface tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  mesher:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build test suite (warnings are errors)
+        run: g++ -std=c++17 -O2 -Wall -Wextra -Werror check/test_surface.cpp -o test_surface
+
+      - name: Run test suite
+        run: ./test_surface
+
+      - name: Run under AddressSanitizer + UndefinedBehaviorSanitizer
+        run: |
+          g++ -std=c++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+              check/test_surface.cpp -o test_asan
+          UBSAN_OPTIONS=halt_on_error=1 ./test_asan
+
+      - name: SOP glue compiles (stub headers, batch + per-call output)
+        run: |
+          for B in 0 1; do
+            g++ -std=c++17 -Wall -Wextra -Werror -Icheck/stub_td -I. \
+                -DSOP_BATCH_OUTPUT=$B -c ParticleSurfaceSOP.cpp -o /dev/null
+          done

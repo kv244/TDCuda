@@ -1,11 +1,13 @@
 name: Compile
 
-# Compiles the CUDA custom operator on every push / PR. The badge in README.md
-# reflects the latest run of this workflow on the default branch.
+# Compiles the custom operators (ParticleCloudTOP, ParticleDensityTOP,
+# ParticleSurfaceSOP) on every push / PR. The badge in README.md reflects the
+# latest run of this workflow on the default branch.
 #
 # The TouchDesigner C++ API headers are proprietary and NOT committed here, so
 # CI fetches them from Derivative's public CustomOperatorSamples repository and
-# points the build at whatever folder contains TOP_CPlusPlusBase.h.
+# points the build at the folders containing TOP_CPlusPlusBase.h and
+# SOP_CPlusPlusBase.h.
 
 on:
   push:
@@ -49,31 +51,42 @@ jobs:
                  Select-Object -First 1
           if (-not $hdr) { Write-Error "TOP_CPlusPlusBase.h not found in CustomOperatorSamples"; exit 1 }
           $dir = $hdr.Directory.FullName
-          Write-Host "TD headers at: $dir"
+          Write-Host "TD TOP headers at: $dir"
           "TD_INCLUDE=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $sop = Get-ChildItem -Path tdsamples -Recurse -Filter SOP_CPlusPlusBase.h |
+                 Select-Object -First 1
+          if (-not $sop) { Write-Error "SOP_CPlusPlusBase.h not found in CustomOperatorSamples"; exit 1 }
+          $sopdir = $sop.Directory.FullName
+          Write-Host "TD SOP headers at: $sopdir"
+          "TD_SOP_INCLUDE=$sopdir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Configure (CMake + Ninja)
         shell: pwsh
         run: |
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH" `
-            -DTD_INCLUDE="$env:TD_INCLUDE"
+            -DTD_INCLUDE="$env:TD_INCLUDE" `
+            -DTD_SOP_INCLUDE="$env:TD_SOP_INCLUDE"
 
       - name: Build
         shell: pwsh
         run: cmake --build build --config Release
 
-      - name: Verify the DLL was produced
+      - name: Verify the DLLs were produced
         shell: pwsh
         run: |
-          $dll = Get-ChildItem -Path build -Recurse -Filter ParticleCloudTOP.dll |
-                 Select-Object -First 1
-          if (-not $dll) { Write-Error "ParticleCloudTOP.dll was not built"; exit 1 }
-          Write-Host "Built: $($dll.FullName)  ($([math]::Round($dll.Length/1KB)) KB)"
+          foreach ($name in 'ParticleCloudTOP', 'ParticleDensityTOP', 'ParticleSurfaceSOP') {
+            $dll = Get-ChildItem -Path build -Recurse -Filter "$name.dll" | Select-Object -First 1
+            if (-not $dll) { Write-Error "$name.dll was not built"; exit 1 }
+            Write-Host "Built: $($dll.FullName)  ($([math]::Round($dll.Length/1KB)) KB)"
+          }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ParticleCloudTOP
-          path: build/**/ParticleCloudTOP.dll
+          name: TDCuda-operators
+          path: |
+            build/**/ParticleCloudTOP.dll
+            build/**/ParticleDensityTOP.dll
+            build/**/ParticleSurfaceSOP.dll
           if-no-files-found: error
