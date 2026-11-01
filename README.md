@@ -29,6 +29,18 @@ The force field is **O(N)** per frame (central gravity well + swirl +
 turbulence + damping), not an O(N²) all-pairs gravity — that would need
 tiling / Barnes-Hut and is a natural next step.
 
+### Surface mode — the cloud as a live mesh
+
+![Isosurface of the particle cloud](docs/particle_surface.jpg)
+
+Two more operators turn the same simulation into a **watertight,
+smooth-shaded isosurface** (a liquid / metaball body) that moves with the sim:
+`ParticleDensityTOP` splats the particles into a density grid **on the GPU**,
+and `ParticleSurfaceSOP` meshes it with marching tetrahedra. Only the grid
+(~1 MB at 64³) comes back to the CPU, whatever the particle count. Run it with
+`build_particle_surface.py` or drag in `ParticleCloudSurface.tox`. Full design,
+controls, test results and performance: **[SURFACE.md](SURFACE.md)**.
+
 ## Repository layout
 
 | File | Purpose |
@@ -38,7 +50,15 @@ tiling / Barnes-Hut and is a natural next step.
 | `build.bat` | One-click Windows build (selects CUDA 12.8 + the TD headers). |
 | `build_particle_cloud_cuda.py` | Builds the whole TD network (CUDA TOP, GLSL material, geometry, camera, bloom) and exposes its controls, when run inside TouchDesigner. |
 | `ParticleCloudCUDA.tox` | Prebuilt component — drag into any project, then point the inner CUDA TOP's Plugin Path at your built DLL. |
-| `.github/workflows/compile.yml` | CI that compiles the operator on every push (drives the badge above). |
+| `ParticleDensityTOP.cu` | Surface mode: CUDA TOP that splats the positions into a blurred, normalised density grid (output as a slice atlas). |
+| `ParticleSurfaceSOP.cpp` | Surface mode: SOP that meshes the density grid (glue around `SurfaceMesher.h`). |
+| `SurfaceMesher.h` | Marching tetrahedra with vertex welding, gradient normals and empty-space skipping — no TouchDesigner dependency, unit-tested. |
+| `DensityAtlas.h` | The shared 3D-grid-in-a-2D-texture layout contract between the density TOP and the SOP. |
+| `build_particle_surface.py` | Adds surface mode (density TOP → TOP to CHOP → surface SOP + material + controls) to the built component. |
+| `ParticleCloudSurface.tox` | Prebuilt component *with* surface mode (needs all three DLLs). |
+| `SURFACE.md` | Surface mode: design, controls, verification, performance. |
+| `check/` | Linux test suite for the mesher + CPU reference of the density kernels, and CI stub headers. |
+| `.github/workflows/compile.yml` | CI that compiles the operators on every push (drives the badge above). |
 
 ## Prerequisites (local build, Windows)
 
@@ -70,8 +90,15 @@ cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release ^
 cmake --build build --config Release
 ```
 
-Output: `build/Release/ParticleCloudTOP.dll` (VS) or
-`build/ParticleCloudTOP.dll` (Ninja).
+Output: `ParticleCloudTOP.dll`, `ParticleDensityTOP.dll` and
+`ParticleSurfaceSOP.dll` in `build/Release/` (VS) or `build/` (Ninja). The SOP
+needs the **SOP** API headers too: `build.bat` points `TD_SOP_INCLUDE` at the
+`SimpleShapesSOP` sample (CMake defaults to that folder next to `TD_INCLUDE`
+and skips the SOP with a warning if it can't find the headers).
+
+> **Rebuilding while TouchDesigner is open:** Windows locks a loaded DLL. Turn on
+> the C++ operator's **Unload Plugin** toggle *and let it cook* (TD only frees
+> the DLL on the next cook), rebuild, then turn it off again.
 
 > **Host compiler note:** recent MSVC toolsets are newer than older CUDA
 > toolkits officially list. The `-allow-unsupported-compiler` flag (already in
@@ -125,6 +152,10 @@ To build the complete, pre-wired, GUI-controllable component:
 
 Or skip the script: drag **`ParticleCloudCUDA.tox`** into your network and set
 the inner `cuda_particles` TOP's **Plugin Path** to your built DLL.
+
+For surface mode, run `build_particle_surface.py` afterwards (or use
+`ParticleCloudSurface.tox`); its controls are on the component's **Surface**
+page — see [SURFACE.md](SURFACE.md).
 
 ## Controls
 
@@ -187,6 +218,9 @@ with CMake + Ninja. The badge at the top reflects the latest run.
 - ~~True GL point sprites for 1M+ particles~~ — added as the **Triangle sprite**
   render mode (TD can't rasterize loose `GL_POINTS`; a single instanced
   triangle is the cheapest renderable sprite — see *Render modes* above).
+- Surface mode: mesh on the GPU and write the SOP's VBO directly
+  (`directToGPU`), and read the density TOP inside the SOP instead of via
+  TOP to CHOP — the two remaining main-thread costs (see SURFACE.md).
 - Per-particle color by speed / age via extra texture channels.
 - All-pairs or Barnes-Hut gravity for real N-body behaviour.
 

@@ -23,3 +23,9 @@ nvcctest.bat
 .vscode/
 Thumbs.db
 desktop.ini
+
+# Scratch copies of the proprietary TouchDesigner C++ headers / samples
+# (used for local API verification; never commit -- (c) Derivative)
+_hdr/
+_caps/
+build.log

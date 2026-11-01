@@ -8,6 +8,12 @@
 //   texel = (x, y, z, life)
 // The render side reads that texture per-instance with texelFetch(TDInstanceID).
 //
+// The texture is square (side = ceil(sqrt(Count))), so it has side*side texels
+// but only Count live particles. Texels past Count are PADDING and are written
+// as (0,0,0,0): life/alpha = 0 marks them dead, so downstream consumers (the
+// density splat in ParticleDensityTOP) can mask on alpha instead of trusting
+// texel order or a separately-synced Count.
+//
 // This is the step up from the earlier "procedural positions per frame":
 // particles now carry state (velocity) and evolve, like a cheap N-body/agent
 // system. Forces here are a field (O(N)), not all-pairs gravity (O(N^2)) --
@@ -67,18 +73,32 @@ __global__ void initKernel(float4* pos, float4* vel, int count,
 }
 
 // Integrate one step and write the new position into the output surface.
+// Launched over ALL side*side texels: threads past `count` own a padding texel
+// and write (0,0,0,0) so its contents are defined (alpha 0 = dead). Without
+// this, padding texels hold whatever the freshly-created CUDA array contained.
 __global__ void simKernel(float4* pos, float4* vel, cudaSurfaceObject_t surf,
                           int side, int count, float dt, float t,
                           float gravity, float swirl, float damping, float turb)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= count) return;
+    int total = side * side;
+    if (i >= total) return;
+
+    int x = i % side;
+    int y = i / side;
+
+    if (i >= count)
+    {
+        surf2Dwrite(make_float4(0.0f, 0.0f, 0.0f, 0.0f), surf,
+                    x * (int)sizeof(float4), y);
+        return;
+    }
 
     float4 P = pos[i], V = vel[i];
     float px = P.x, py = P.y, pz = P.z;
     float vx = V.x, vy = V.y, vz = V.z;
 
-    // central spring / gravity well
+    // central spring / gravity well (negative gravity = repulsion)
     float ax = -gravity * px;
     float ay = -gravity * py;
     float az = -gravity * pz;
@@ -101,8 +121,6 @@ __global__ void simKernel(float4* pos, float4* vel, cudaSurfaceObject_t surf,
     pos[i] = make_float4(px, py, pz, 1.0f);
     vel[i] = make_float4(vx, vy, vz, 0.0f);
 
-    int x = i % side;
-    int y = i / side;
     surf2Dwrite(make_float4(px, py, pz, 1.0f), surf, x * (int)sizeof(float4), y);
 }
 
@@ -192,12 +210,12 @@ public:
 
         if (!myContext->beginCUDAOperations(nullptr)) return;
 
-        int block = 256;
-        int grid  = (count + block - 1) / block;
+        const int block = 256;
 
         if (myNeedsInit && myPos && myVel)
         {
-            initKernel<<<grid, block, 0, myStream>>>(
+            int gridInit = (count + block - 1) / block;
+            initKernel<<<gridInit, block, 0, myStream>>>(
                 myPos, myVel, count, (float)radius, (float)swirl);
             myNeedsInit = false;
         }
@@ -211,7 +229,10 @@ public:
             cudaSurfaceObject_t surf = 0;
             if (cudaCreateSurfaceObject(&surf, &resDesc) == cudaSuccess)
             {
-                simKernel<<<grid, block, 0, myStream>>>(
+                // cover every texel (live + padding), not just `count`
+                int total   = side * side;
+                int gridSim = (total + block - 1) / block;
+                simKernel<<<gridSim, block, 0, myStream>>>(
                     myPos, myVel, surf, side, count, dt, t,
                     (float)gravity, (float)swirl, (float)damping, (float)turb);
                 cudaDestroySurfaceObject(surf);
@@ -247,14 +268,18 @@ private:
 // Newer headers (2025.x) make TOP_PluginInfo::apiVersion private and expose
 // setAPIVersion(); older public headers (CustomOperatorSamples) expose a
 // public apiVersion member to assign directly. SFINAE picks whichever exists:
-// the (…, int) overload is preferred and only compiles when setAPIVersion is
-// available; otherwise the (…, long) overload assigns apiVersion directly.
+// the (..., int) overload is preferred and only compiles when setAPIVersion is
+// available; otherwise the (..., long) overload assigns apiVersion directly.
 // ---------------------------------------------------------------------------
 template <typename T>
 static auto tdSetAPIVersion(T* info, int)
     -> decltype(info->setAPIVersion(TOPCPlusPlusAPIVersion), void())
 {
-    info->setAPIVersion(TOPCPlusPlusAPIVersion);
+    // setAPIVersion() is [[nodiscard]] bool in 2025.x headers: it always stores
+    // the version and returns whether TD declared it supported. TD itself
+    // refuses to load an incompatible plugin, so there is nothing to recover
+    // here -- discard the flag explicitly instead of tripping -Wunused-result.
+    (void)info->setAPIVersion(TOPCPlusPlusAPIVersion);
 }
 template <typename T>
 static void tdSetAPIVersion(T* info, long)
