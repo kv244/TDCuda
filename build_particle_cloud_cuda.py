@@ -68,8 +68,23 @@ CONTAINER_NAME = "particle_cloud_cuda"
 # ----------------------------------------------------------------------
 VERTEX_SHADER = """
 uniform sampler2D sPos;
-uniform vec4 uSprite;      // .x = world-space sprite size
+uniform vec4 uSprite;      // .x = world-space sprite size, .y = color mode (0 single, 1 multi)
+uniform vec4 uColor;       // .rgb = single color, .a = glow
 out vec2 vUV;
+out vec3 vCol;             // per-particle color handed to the fragment stage
+
+// integer hash -> [0,1), and a cheap full-sat/val hue ramp
+float hash11(uint x){
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return float(x & 0x00FFFFFFu) / 16777216.0;
+}
+vec3 hue2rgb(float h){
+    vec3 k = vec3(1.0, 2.0/3.0, 1.0/3.0);
+    vec3 p = abs(fract(h + k) * 6.0 - 3.0);
+    return clamp(p - 1.0, 0.0, 1.0);
+}
 
 void main()
 {
@@ -77,6 +92,9 @@ void main()
     int w   = textureSize(sPos, 0).x;
     ivec2 t = ivec2(id % w, id / w);
     vec3 particlePos = texelFetch(sPos, t, 0).xyz;
+
+    // single color from uColor, or a per-particle random hue when multi
+    vCol = (uSprite.y > 0.5) ? hue2rgb(hash11(uint(id))) : uColor.rgb;
 
     vUV = P.xy + 0.5;                  // 0..1 across the sprite quad
     vec3 local = P * uSprite.x;        // scale local quad to world size
@@ -86,9 +104,10 @@ void main()
 """
 
 PIXEL_SHADER = """
-uniform vec4 uColor;       // .rgb = particle color, .a = glow intensity
+uniform vec4 uColor;       // .a = glow intensity (rgb handled per-particle via vCol)
 out vec4 fragColor;
 in vec2 vUV;
+in vec3 vCol;
 
 void main()
 {
@@ -96,7 +115,7 @@ void main()
     float r2 = dot(d, d);
     if (r2 > 1.0) discard;
     float a = smoothstep(1.0, 0.0, r2) * uColor.a;   // dim per particle so
-    fragColor = TDOutputSwizzle(vec4(uColor.rgb * a, a));  // additive accumulates
+    fragColor = TDOutputSwizzle(vec4(vCol * a, a));       // additive accumulates
 }
 """
 
@@ -109,8 +128,22 @@ void main()
 # ----------------------------------------------------------------------
 TRI_VERTEX_SHADER = """
 uniform sampler2D sPos;
-uniform vec4 uSprite;      // .x = world-space sprite size
+uniform vec4 uSprite;      // .x = world-space sprite size, .y = color mode (0 single, 1 multi)
+uniform vec4 uColor;       // .rgb = single color, .a = glow
 out vec2 vD;
+out vec3 vCol;
+
+float hash11(uint x){
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return float(x & 0x00FFFFFFu) / 16777216.0;
+}
+vec3 hue2rgb(float h){
+    vec3 k = vec3(1.0, 2.0/3.0, 1.0/3.0);
+    vec3 p = abs(fract(h + k) * 6.0 - 3.0);
+    return clamp(p - 1.0, 0.0, 1.0);
+}
 
 void main()
 {
@@ -118,6 +151,8 @@ void main()
     int w   = textureSize(sPos, 0).x;
     ivec2 t = ivec2(id % w, id / w);
     vec3 particlePos = texelFetch(sPos, t, 0).xyz;
+
+    vCol = (uSprite.y > 0.5) ? hue2rgb(hash11(uint(id))) : uColor.rgb;
 
     vD = P.xy * 2.0;                   // incircle edge at |vD| = 1
     vec3 local = P * uSprite.x;        // triangle verts on radius-(uSprite.x) circle
@@ -127,16 +162,17 @@ void main()
 """
 
 TRI_PIXEL_SHADER = """
-uniform vec4 uColor;       // .rgb = particle color, .a = glow intensity
+uniform vec4 uColor;       // .a = glow intensity (rgb handled per-particle via vCol)
 out vec4 fragColor;
 in vec2 vD;
+in vec3 vCol;
 
 void main()
 {
     float r2 = dot(vD, vD);            // inscribed-disc carve from the triangle
     if (r2 > 1.0) discard;
     float a = smoothstep(1.0, 0.0, r2) * uColor.a;
-    fragColor = TDOutputSwizzle(vec4(uColor.rgb * a, a));  // premultiplied, additive
+    fragColor = TDOutputSwizzle(vec4(vCol * a, a));       // premultiplied, additive
 }
 """
 
@@ -194,13 +230,17 @@ def _expose(box, cuda, geo, geo_tri, mat, mat_tri, cam, blur):
     pg.appendInt('Count',      label='Particle Count')[0].val = NUM_PARTICLES
     pg.appendFloat('Radius',   label='Cloud Radius')[0].val   = CLOUD_RADIUS
     pg.appendFloat('Speed')[0].val                            = SIM_SPEED
-    pg.appendFloat('Gravity',  label='Gravity Well')[0].val   = GRAVITY
+    pg.appendFloat('Gravity',  label='Gravity (+pull / -push)')[0].val = GRAVITY
     pg.appendFloat('Swirl')[0].val                            = SWIRL
     pg.appendFloat('Damping')[0].val                          = DAMPING
     pg.appendFloat('Turbulence')[0].val                       = TURBULENCE
     pg.appendPulse('Reset')
 
     # --- look controls (shared by both render modes) ---
+    cm = pg.appendMenu('Colormode', label='Color Mode')
+    cm[0].menuNames  = ['single', 'multi']
+    cm[0].menuLabels = ['Single color', 'Many colors']
+    cm[0].val = 'single'
     col = pg.appendRGB('Color')
     col[0].val, col[1].val, col[2].val = NEON_RGB
     pg.appendFloat('Spritesize', label='Sprite Size')[0].val    = SPRITE_SIZE
@@ -210,7 +250,7 @@ def _expose(box, cuda, geo, geo_tri, mat, mat_tri, cam, blur):
 
     # nice slider ranges
     ranges = {'Count': (1024, 2097152), 'Radius': (0.1, 50), 'Speed': (0, 5),
-              'Gravity': (0, 5), 'Swirl': (0, 8), 'Damping': (0.9, 1.0),
+              'Gravity': (-5, 5), 'Swirl': (0, 8), 'Damping': (0.9, 1.0),
               'Turbulence': (0, 5), 'Spritesize': (0.01, 1.0), 'Glow': (0, 1),
               'Camdist': (2, 80), 'Bloom': (0, 30)}
     for nm, (lo, hi) in ranges.items():
@@ -241,6 +281,11 @@ def _expose(box, cuda, geo, geo_tri, mat, mat_tri, cam, blur):
         bind(m, 'vec0valuew', 'Glow')    # per-particle intensity
         m.par.vec1name = 'uSprite'
         bind(m, 'vec1valuex', 'Spritesize')
+        # uSprite.y carries the color mode (0 = single, 1 = multi). This is a
+        # computed value, not a parameter reference, so it uses EXPRESSION mode
+        # (BIND expects a Par object; a bare int is not bindable).
+        m.par.vec1valuey.mode = ParMode.EXPRESSION
+        m.par.vec1valuey.expr = "1 if parent().par.Colormode.eval() == 'multi' else 0"
 
     # Reset pulse -> re-seed the sim (relay to the CUDA TOP's Reset pulse)
     pex = box.create(parameterexecuteDAT, 'reset_exec')

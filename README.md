@@ -139,12 +139,13 @@ control is bound to the operator it drives:
 | **Particle Count** | CUDA TOP + instance count | Number of particles (buffers reallocate on change). |
 | **Cloud Radius** | CUDA TOP | Size of the initial gaussian blob. |
 | **Speed** | CUDA TOP | Time-step multiplier for the integration. |
-| **Gravity Well** | CUDA TOP | Central spring pulling particles toward the origin. |
+| **Gravity (+pull / -push)** | CUDA TOP | Central force. **Positive** pulls particles toward the origin (a well); **0** lets swirl/turbulence carry them; **negative pushes them outward** (repulsion / explosion). |
 | **Swirl** | CUDA TOP | Tangential force — orbital motion around Y. |
 | **Damping** | CUDA TOP | Velocity retained per frame (lower = more drag). |
 | **Turbulence** | CUDA TOP | Strength of the sinusoidal flow field. |
 | **Reset** | CUDA TOP (pulse) | Re-seed positions and velocities. |
-| **Color** | GLSL `uColor` | Particle color (RGB). |
+| **Color Mode** | GLSL (per-particle) | `Single color` (every particle uses **Color**) or `Many colors` (each particle gets its own random hue from a hash of its ID). |
+| **Color** | GLSL `uColor` | Particle color (RGB), used in **Single color** mode. |
 | **Sprite Size** | GLSL `uSprite` | World-space size of each sprite (both modes). |
 | **Glow Intensity** | GLSL `uColor.a` | Per-particle brightness; additive blending accumulates it into a bright core. |
 | **Camera Distance** | Camera `tz` | Pull the camera in/out. |
