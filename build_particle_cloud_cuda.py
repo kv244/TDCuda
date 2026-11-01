@@ -1,5 +1,5 @@
 """
-build_particle_cloud_cuda.py  --  billboard sprites + stateful sim + exposed UI
+build_particle_cloud_cuda.py  --  instanced sprites (quad|triangle), stateful sim, exposed UI
 =======================================================================
 Builds the CUDA particle cloud in TouchDesigner as a self-contained,
 GUI-controllable component.
@@ -7,13 +7,30 @@ GUI-controllable component.
 ParticleCloudTOP.dll (CUDA, stateful) integrates position+velocity every
 frame and outputs an RGBA32F position texture. A GLSL MAT reads that texture
 in the vertex shader (texelFetch by TDInstanceID) and draws each particle as
-a small camera-facing QUAD (billboard) sized in the vertex shader. Two
-triangles per particle scales to hundreds of thousands of particles.
+a camera-facing sprite, in one of two switchable render modes:
+
+  * Billboard quad (default, robust): each particle is a 1x1 quad -> 4 verts,
+    2 tris per particle. The round sprite is carved out in the fragment stage.
+  * Triangle sprite (lighter geometry, for 1M+): each particle is a single
+    triangle -> 3 verts, 1 tri. ~25% fewer vertices and 50% fewer triangles
+    than the quad, which is what buys headroom toward 1M+ on Ada (RTX 4070,
+    sm_89). The triangle circumscribes the sprite disc; the fragment shader
+    discards outside the inscribed circle, so it still looks like a round dot.
+
+WHY NOT TRUE GL_POINTS? TouchDesigner's Render TOP rasterizes *primitives*
+(polys/lines) -- it does not draw loose points, and there is no gl_PointSize
+path through the MAT/Render TOP pipeline (verified: a points-only SOP, with or
+without instancing, renders nothing). So the cheapest *renderable* 1-primitive
+sprite TD supports is a single triangle; that is the practical substitute for
+GL point sprites here. The CUDA side is identical in both modes.
+
+Both modes read the SAME CUDA texture; only the instanced primitive + GLSL
+differ. A 'Render Mode' menu on the component flips between them live (each geo
+renders only in its own mode).
 
 The /particle_cloud_cuda COMP gets its own Custom Parameter page ("Particle
 Cloud"), so every control is adjustable from the component's parameter dialog
-at runtime. The sim params bind to the CUDA TOP, camera/bloom bind to those
-operators, and Color/Sprite Size drive GLSL uniforms (uColor / uSprite).
+at runtime.
 
 RUN: paste into a Text DAT -> right-click -> Run Script. View the 'out' TOP.
 Re-running rebuilds /particle_cloud_cuda cleanly.
@@ -24,7 +41,8 @@ Re-running rebuilds /particle_cloud_cuda cleanly.
 # ----------------------------------------------------------------------
 DLL_PATH      = r"C:/Users/julia/Downloads/TDClaude/build/Release/ParticleCloudTOP.dll"
 
-NUM_PARTICLES = 200000         # billboards are cheap -> push this high
+NUM_PARTICLES = 200000         # both modes are cheap; the triangle mode pushes
+                               #   comfortably past 1,000,000 on the 4070
 CLOUD_RADIUS  = 6.0
 SIM_SPEED     = 1.0
 GRAVITY       = 0.8
@@ -32,18 +50,21 @@ SWIRL         = 1.4
 DAMPING       = 0.985
 TURBULENCE    = 0.4
 
-SPRITE_SIZE   = 0.10           # world-space size of each sprite
+SPRITE_SIZE   = 0.10           # world-space size of each sprite (both modes)
 GLOW          = 0.06           # per-particle intensity (additive accumulates it)
 CAM_DIST      = 38.0           # pulled back so the cloud reads as a glowing orb
 NEON_RGB      = (0.0, 0.92, 1.0)
 BLOOM_SIZE    = 10.0
 
+RENDER_MODE   = 'billboard'    # startup mode: 'billboard' (quad) | 'triangle'
+
 CONTAINER_NAME = "particle_cloud_cuda"
 
 # ----------------------------------------------------------------------
-# SHADERS  (color + sprite size come from GLSL uniforms so they are
-#           controllable at runtime; uColor.rgb and uSprite.x are fed by
-#           the GLSL MAT's vector uniforms, bound to the component params)
+# SHADERS -- billboard quad path
+#   color + sprite size come from GLSL uniforms so they are controllable at
+#   runtime; uColor.rgb / uColor.a (glow) and uSprite.x are fed by the GLSL
+#   MAT's vector uniforms, bound to the component params.
 # ----------------------------------------------------------------------
 VERTEX_SHADER = """
 uniform sampler2D sPos;
@@ -80,6 +101,47 @@ void main()
 """
 
 # ----------------------------------------------------------------------
+# SHADERS -- triangle sprite path
+#   Instanced single triangle (verts on a unit circle, so corners sit at
+#   radius 1). vD = P.xy * 2 puts the triangle's inscribed circle (incircle
+#   radius 0.5) at |vD| = 1, so the fragment discard carves a round dot of the
+#   same world size as the quad mode (sprite radius = 0.5 * uSprite.x).
+# ----------------------------------------------------------------------
+TRI_VERTEX_SHADER = """
+uniform sampler2D sPos;
+uniform vec4 uSprite;      // .x = world-space sprite size
+out vec2 vD;
+
+void main()
+{
+    int id  = TDInstanceID();
+    int w   = textureSize(sPos, 0).x;
+    ivec2 t = ivec2(id % w, id / w);
+    vec3 particlePos = texelFetch(sPos, t, 0).xyz;
+
+    vD = P.xy * 2.0;                   // incircle edge at |vD| = 1
+    vec3 local = P * uSprite.x;        // triangle verts on radius-(uSprite.x) circle
+    vec4 world = TDDeform(vec4(local + particlePos, 1.0));
+    gl_Position = TDWorldToProj(world);
+}
+"""
+
+TRI_PIXEL_SHADER = """
+uniform vec4 uColor;       // .rgb = particle color, .a = glow intensity
+out vec4 fragColor;
+in vec2 vD;
+
+void main()
+{
+    float r2 = dot(vD, vD);            // inscribed-disc carve from the triangle
+    if (r2 > 1.0) discard;
+    float a = smoothstep(1.0, 0.0, r2) * uColor.a;
+    fragColor = TDOutputSwizzle(vec4(uColor.rgb * a, a));  // premultiplied, additive
+}
+"""
+
+
+# ----------------------------------------------------------------------
 def _set_first(owner, names, value, what):
     for n in names:
         if hasattr(owner.par, n):
@@ -91,9 +153,42 @@ def _set_first(owner, names, value, what):
     return False
 
 
-def _expose(box, cuda, geo, mat, cam, blur):
+def _make_glsl_mat(box, name, vtext, ptext, cuda, x, y):
+    """Create a GLSL MAT with additive blending that samples the CUDA TOP."""
+    vdat = box.create(textDAT, name + '_vertex')
+    vdat.text = vtext
+    vdat.nodeX, vdat.nodeY = x, y + 60
+
+    pdat = box.create(textDAT, name + '_pixel')
+    pdat.text = ptext
+    pdat.nodeX, pdat.nodeY = x, y - 60
+
+    mat = box.create(glslMAT, name)
+    mat.nodeX, mat.nodeY = x + 250, y
+    _set_first(mat, ['vdat', 'vertexdat'], vdat.name, 'vertex shader DAT')
+    _set_first(mat, ['pdat', 'pixeldat'],  pdat.name, 'pixel shader DAT')
+    _set_first(mat, ['sampler0name', 'sampler1name'], 'sPos', 'sampler name')
+    _set_first(mat, ['sampler0top',  'sampler1top'],  cuda.path, 'sampler TOP')
+    # Additive blending: overlapping sprites accumulate into a bright neon core
+    # (the pixel shader outputs premultiplied colour, so src=one, dst=one adds
+    # colour*alpha). Depth writing off so particles never occlude each other.
+    _set_first(mat, ['blending'],     True,  'enable blending')
+    _set_first(mat, ['blendop'],      'add', 'blend operation')
+    _set_first(mat, ['srcblend'],     'one', 'source blend factor')
+    _set_first(mat, ['destblend'],    'one', 'dest blend factor')
+    _set_first(mat, ['depthwriting'], False, 'disable depth writing')
+    return mat
+
+
+def _expose(box, cuda, geo, geo_tri, mat, mat_tri, cam, blur):
     """Add a Custom Parameter page to the COMP and wire every control to it."""
     pg = box.appendCustomPage('Particle Cloud')
+
+    # --- render mode (live switch between the two geometry paths) ---
+    rm = pg.appendMenu('Rendermode', label='Render Mode')
+    rm[0].menuNames  = ['billboard', 'triangle']
+    rm[0].menuLabels = ['Billboard quad (robust)', 'Triangle sprite (1M+)']
+    rm[0].val = RENDER_MODE
 
     # --- simulation controls (bind -> CUDA TOP) ---
     pg.appendInt('Count',      label='Particle Count')[0].val = NUM_PARTICLES
@@ -105,7 +200,7 @@ def _expose(box, cuda, geo, mat, cam, blur):
     pg.appendFloat('Turbulence')[0].val                       = TURBULENCE
     pg.appendPulse('Reset')
 
-    # --- look controls ---
+    # --- look controls (shared by both render modes) ---
     col = pg.appendRGB('Color')
     col[0].val, col[1].val, col[2].val = NEON_RGB
     pg.appendFloat('Spritesize', label='Sprite Size')[0].val    = SPRITE_SIZE
@@ -114,7 +209,7 @@ def _expose(box, cuda, geo, mat, cam, blur):
     pg.appendFloat('Bloom')[0].val                               = BLOOM_SIZE
 
     # nice slider ranges
-    ranges = {'Count': (1024, 1048576), 'Radius': (0.1, 50), 'Speed': (0, 5),
+    ranges = {'Count': (1024, 2097152), 'Radius': (0.1, 50), 'Speed': (0, 5),
               'Gravity': (0, 5), 'Swirl': (0, 8), 'Damping': (0.9, 1.0),
               'Turbulence': (0, 5), 'Spritesize': (0.01, 1.0), 'Glow': (0, 1),
               'Camdist': (2, 80), 'Bloom': (0, 30)}
@@ -130,20 +225,22 @@ def _expose(box, cuda, geo, mat, cam, blur):
     # simulation params -> CUDA TOP
     for nm in ('Count', 'Radius', 'Speed', 'Gravity', 'Swirl', 'Damping', 'Turbulence'):
         bind(cuda, nm, nm)
-    # keep the rendered instance count in sync with the particle count
+    # keep both geometry paths' instance count in sync with the particle count
     bind(geo, 'numinstances', 'Count')
+    bind(geo_tri, 'numinstances', 'Count')
     # camera distance + bloom size
     bind(cam, 'tz', 'Camdist')
     bind(blur, 'size', 'Bloom')
 
-    # GLSL uniforms: uColor (vec0), uSprite (vec1), bound to the look controls
-    mat.par.vec0name = 'uColor'
-    bind(mat, 'vec0valuex', 'Colorr')
-    bind(mat, 'vec0valuey', 'Colorg')
-    bind(mat, 'vec0valuez', 'Colorb')
-    bind(mat, 'vec0valuew', 'Glow')    # per-particle intensity
-    mat.par.vec1name = 'uSprite'
-    bind(mat, 'vec1valuex', 'Spritesize')
+    # both materials share the same uniforms: uColor (vec0), uSprite (vec1)
+    for m in (mat, mat_tri):
+        m.par.vec0name = 'uColor'
+        bind(m, 'vec0valuex', 'Colorr')
+        bind(m, 'vec0valuey', 'Colorg')
+        bind(m, 'vec0valuez', 'Colorb')
+        bind(m, 'vec0valuew', 'Glow')    # per-particle intensity
+        m.par.vec1name = 'uSprite'
+        bind(m, 'vec1valuex', 'Spritesize')
 
     # Reset pulse -> re-seed the sim (relay to the CUDA TOP's Reset pulse)
     pex = box.create(parameterexecuteDAT, 'reset_exec')
@@ -176,31 +273,13 @@ def build():
     except Exception:
         pass
 
-    # --- shaders ------------------------------------------------------------
-    vdat = box.create(textDAT, 'vertex_shader')
-    vdat.text = VERTEX_SHADER
-    vdat.nodeX, vdat.nodeY = 0, 250
+    # --- materials: one per render path, both sampling the CUDA texture -----
+    mat     = _make_glsl_mat(box, 'particle_mat', VERTEX_SHADER, PIXEL_SHADER,
+                             cuda, 250, 200)
+    mat_tri = _make_glsl_mat(box, 'tri_mat', TRI_VERTEX_SHADER,
+                             TRI_PIXEL_SHADER, cuda, 250, -120)
 
-    pdat = box.create(textDAT, 'pixel_shader')
-    pdat.text = PIXEL_SHADER
-    pdat.nodeX, pdat.nodeY = 0, 150
-
-    mat = box.create(glslMAT, 'particle_mat')
-    mat.nodeX, mat.nodeY = 250, 200
-    _set_first(mat, ['vdat', 'vertexdat'], vdat.name, 'vertex shader DAT')
-    _set_first(mat, ['pdat', 'pixeldat'],  pdat.name, 'pixel shader DAT')
-    _set_first(mat, ['sampler0name', 'sampler1name'], 'sPos', 'sampler name')
-    _set_first(mat, ['sampler0top',  'sampler1top'],  cuda.path, 'sampler TOP')
-    # Additive blending: overlapping sprites accumulate into a bright neon core
-    # (the pixel shader outputs premultiplied colour, so src=one, dst=one adds
-    # colour*alpha). Depth writing off so particles never occlude each other.
-    _set_first(mat, ['blending'],     True,  'enable blending')
-    _set_first(mat, ['blendop'],      'add', 'blend operation')
-    _set_first(mat, ['srcblend'],     'one', 'source blend factor')
-    _set_first(mat, ['destblend'],    'one', 'dest blend factor')
-    _set_first(mat, ['depthwriting'], False, 'disable depth writing')
-
-    # --- geometry: a unit quad, instanced N times as billboards -------------
+    # --- geometry A: a unit quad, instanced N times as billboards -----------
     geo = box.create(geometryCOMP, 'cloud')
     geo.nodeX, geo.nodeY = 450, 0
     for child in list(geo.children):
@@ -220,6 +299,33 @@ def build():
     geo.par.numinstances = NUM_PARTICLES
     geo.par.material = mat.path
 
+    # --- geometry B: a single triangle, instanced N times -------------------
+    # A circle SOP with 3 divisions is one triangular polygon (3 verts, 1 tri)
+    # -- the cheapest renderable sprite TD will rasterize. ~25% fewer verts and
+    # 50% fewer tris than the quad, so it carries higher particle counts before
+    # becoming vertex/primitive-bound. The round dot is carved in the fragment
+    # shader (TD's Render TOP won't draw loose GL_POINTS, so this is how we get
+    # a point-sprite look at 1M+).
+    geo_tri = box.create(geometryCOMP, 'cloud_tri')
+    geo_tri.nodeX, geo_tri.nodeY = 450, -200
+    for child in list(geo_tri.children):
+        child.destroy()
+
+    tri = geo_tri.create(circleSOP, 'shape')
+    _set_first(tri, ['type'], 'poly', 'circle type=poly')
+    _set_first(tri, ['arc'], 'full', 'circle arc=full')
+    _set_first(tri, ['divs', 'divisions'], 3, 'circle divisions=3')
+    _set_first(tri, ['radx'], 1.0, 'circle radius x')
+    _set_first(tri, ['rady'], 1.0, 'circle radius y')
+    _set_first(tri, ['texture'], False, 'circle texture coords off')
+    tri.render = True
+    tri.display = True
+
+    geo_tri.par.instancing = True
+    _set_first(geo_tri, ['instancecountmode'], 'manual', 'instance count mode')
+    geo_tri.par.numinstances = NUM_PARTICLES
+    geo_tri.par.material = mat_tri.path
+
     # --- camera + light -----------------------------------------------------
     cam = box.create(cameraCOMP, 'cam1')
     cam.nodeX, cam.nodeY = 450, 200
@@ -233,8 +339,13 @@ def build():
     render = box.create(renderTOP, 'render1')
     render.nodeX, render.nodeY = 700, 0
     render.par.camera = cam.path
-    render.par.geometry = geo.path
+    # both geometry paths are assigned; the render flag (bound below) decides
+    # which one actually draws, so there is no double cost.
+    render.par.geometry = geo.path + ' ' + geo_tri.path
     render.par.lights = light.path
+    # live Billboard|Triangle switch: each geo renders only in its own mode
+    geo.par.render.expr     = "parent().par.Rendermode.eval() == 'billboard'"
+    geo_tri.par.render.expr = "parent().par.Rendermode.eval() == 'triangle'"
     _set_first(render, ['outputresolution'], 'custom', 'render resolution mode')
     _set_first(render, ['resolutionw'], 1280, 'render width')
     _set_first(render, ['resolutionh'], 720, 'render height')
@@ -256,10 +367,11 @@ def build():
     out.viewer = True
 
     # --- expose all controls on the COMP's own parameter page ---------------
-    _expose(box, cuda, geo, mat, cam, blur)
+    _expose(box, cuda, geo, geo_tri, mat, mat_tri, cam, blur)
 
-    print(f"[cuda cloud] built /{CONTAINER_NAME} ({NUM_PARTICLES} particles). "
-          f"Controls are on the COMP's 'Particle Cloud' parameter page.")
+    print(f"[cuda cloud] built /{CONTAINER_NAME} ({NUM_PARTICLES} particles, "
+          f"mode={RENDER_MODE}). Controls on the COMP's 'Particle Cloud' page; "
+          f"flip 'Render Mode' to switch Billboard<->Triangle live.")
     return box
 
 

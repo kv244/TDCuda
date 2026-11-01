@@ -135,6 +135,7 @@ control is bound to the operator it drives:
 
 | Parameter | Drives | Meaning |
 |-----------|--------|---------|
+| **Render Mode** | geometry switch | `Billboard quad` (robust) or `Triangle sprite` (lighter geometry for 1M+). Switches live. |
 | **Particle Count** | CUDA TOP + instance count | Number of particles (buffers reallocate on change). |
 | **Cloud Radius** | CUDA TOP | Size of the initial gaussian blob. |
 | **Speed** | CUDA TOP | Time-step multiplier for the integration. |
@@ -144,13 +145,31 @@ control is bound to the operator it drives:
 | **Turbulence** | CUDA TOP | Strength of the sinusoidal flow field. |
 | **Reset** | CUDA TOP (pulse) | Re-seed positions and velocities. |
 | **Color** | GLSL `uColor` | Particle color (RGB). |
-| **Sprite Size** | GLSL `uSprite` | World-space size of each billboard. |
+| **Sprite Size** | GLSL `uSprite` | World-space size of each sprite (both modes). |
 | **Glow Intensity** | GLSL `uColor.a` | Per-particle brightness; additive blending accumulates it into a bright core. |
 | **Camera Distance** | Camera `tz` | Pull the camera in/out. |
 | **Bloom** | Blur size | Strength of the neon glow. |
 
 (The CUDA TOP keeps its own Custom page too, if you load it standalone via
 method A/B above.)
+
+### Render modes — and why not true GL point sprites
+
+Both modes read the **same** CUDA position texture; only the instanced
+primitive and its GLSL shader differ, and the **Render Mode** menu flips
+between them live (each geometry renders only in its own mode, so there is no
+double cost):
+
+| Mode | Primitive / particle | Notes |
+|------|----------------------|-------|
+| **Billboard quad** (default) | 4 verts, 2 tris | Robust, edge-safe, big well-behaved sprites. |
+| **Triangle sprite** | 3 verts, 1 tri | ~25% fewer verts / 50% fewer tris → more headroom toward 1M+ when vertex/primitive-bound. The round dot is carved from the triangle in the fragment shader. |
+
+There is deliberately **no literal `GL_POINTS` mode**: TouchDesigner's Render
+TOP rasterizes *primitives* (polys/lines) and offers no `gl_PointSize` path —
+a points-only SOP renders nothing, with or without instancing (verified). So
+the cheapest *renderable* one-primitive sprite TD supports is a single
+triangle, and that is the practical substitute for GL point sprites at scale.
 
 ## Continuous integration
 
@@ -161,7 +180,9 @@ with CMake + Ninja. The badge at the top reflects the latest run.
 
 ## Roadmap
 
-- True GL point sprites for 1M+ particles (billboards are the robust default).
+- ~~True GL point sprites for 1M+ particles~~ — added as the **Triangle sprite**
+  render mode (TD can't rasterize loose `GL_POINTS`; a single instanced
+  triangle is the cheapest renderable sprite — see *Render modes* above).
 - Per-particle color by speed / age via extra texture channels.
 - All-pairs or Barnes-Hut gravity for real N-body behaviour.
 
