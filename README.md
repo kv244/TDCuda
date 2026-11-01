@@ -150,6 +150,7 @@ control is bound to the operator it drives:
 | **Color** | GLSL `uColor` | Particle color (RGB), used in **Single color** mode. |
 | **Sprite Size** | GLSL `uSprite` | World-space size of each sprite (both modes). |
 | **Glow Intensity** | GLSL `uColor.a` | Per-particle brightness; additive blending accumulates it into a bright core. |
+| **Core LOD (cull frac)** | GLSL (vertex cull) | Fraction of particles **inside the core radius** (0.4 × Cloud Radius) culled in the vertex shader (collapsed off-screen → zero fragments). Cuts additive overdraw where it's most expensive; the dense core is where dropping particles is least visible. 0 = off. |
 | **Camera Distance** | Camera `tz` | Pull the camera in/out. |
 | **Bloom** | Blur size | Strength of the neon glow. |
 

@@ -93,6 +93,16 @@ void main()
     ivec2 t = ivec2(id % w, id / w);
     vec3 particlePos = texelFetch(sPos, t, 0).xyz;
 
+    // near-core LOD: cull a fraction (uSprite.z) of particles inside the core
+    // radius (uSprite.w), where additive overdraw is most expensive. Culled
+    // instances go offscreen -> clipped -> zero fragments.
+    if (uSprite.z > 0.001 && length(particlePos) < uSprite.w
+        && hash11(uint(id) * 2246822519u + 7u) < uSprite.z) {
+        vCol = vec3(0.0); vUV = vec2(0.0);
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+    }
+
     // single color from uColor, or a per-particle random hue when multi
     vCol = (uSprite.y > 0.5) ? hue2rgb(hash11(uint(id))) : uColor.rgb;
 
@@ -151,6 +161,15 @@ void main()
     int w   = textureSize(sPos, 0).x;
     ivec2 t = ivec2(id % w, id / w);
     vec3 particlePos = texelFetch(sPos, t, 0).xyz;
+
+    // near-core LOD: cull a fraction (uSprite.z) inside the core radius
+    // (uSprite.w) to cut additive overdraw. Culled instances are clipped.
+    if (uSprite.z > 0.001 && length(particlePos) < uSprite.w
+        && hash11(uint(id) * 2246822519u + 7u) < uSprite.z) {
+        vCol = vec3(0.0); vD = vec2(0.0);
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+    }
 
     vCol = (uSprite.y > 0.5) ? hue2rgb(hash11(uint(id))) : uColor.rgb;
 
@@ -247,6 +266,7 @@ def _expose(box, cuda, geo, geo_tri, mat, mat_tri, cam, blur):
     col[0].val, col[1].val, col[2].val = NEON_RGB
     pg.appendFloat('Spritesize', label='Sprite Size')[0].val    = SPRITE_SIZE
     pg.appendFloat('Glow',       label='Glow Intensity')[0].val = GLOW
+    pg.appendFloat('Corelod',    label='Core LOD (cull frac)')[0].val = 0.0
     pg.appendFloat('Camdist',    label='Camera Distance')[0].val = CAM_DIST
     pg.appendFloat('Bloom')[0].val                               = BLOOM_SIZE
 
@@ -254,7 +274,7 @@ def _expose(box, cuda, geo, geo_tri, mat, mat_tri, cam, blur):
     ranges = {'Count': (1024, 2097152), 'Radius': (0.1, 50), 'Speed': (0, 5),
               'Gravity': (-5, 5), 'Swirl': (0, 8), 'Damping': (0.9, 1.0),
               'Turbulence': (0, 5), 'Resetperiod': (0.5, 30),
-              'Spritesize': (0.01, 1.0), 'Glow': (0, 1),
+              'Spritesize': (0.01, 1.0), 'Glow': (0, 1), 'Corelod': (0, 0.95),
               'Camdist': (2, 80), 'Bloom': (0, 30)}
     for nm, (lo, hi) in ranges.items():
         p = getattr(box.par, nm)
@@ -289,6 +309,11 @@ def _expose(box, cuda, geo, geo_tri, mat, mat_tri, cam, blur):
         # (BIND expects a Par object; a bare int is not bindable).
         m.par.vec1valuey.mode = ParMode.EXPRESSION
         m.par.vec1valuey.expr = "1 if parent().par.Colormode.eval() == 'multi' else 0"
+        # uSprite.z = core-LOD cull fraction; uSprite.w = core radius (a slice
+        # of Cloud Radius, computed -> EXPRESSION).
+        bind(m, 'vec1valuez', 'Corelod')
+        m.par.vec1valuew.mode = ParMode.EXPRESSION
+        m.par.vec1valuew.expr = "parent().par.Radius * 0.4"
 
     # Reset pulse -> re-seed the sim (relay to the CUDA TOP's Reset pulse)
     pex = box.create(parameterexecuteDAT, 'reset_exec')
