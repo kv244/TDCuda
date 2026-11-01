@@ -144,6 +144,8 @@ control is bound to the operator it drives:
 | **Damping** | CUDA TOP | Velocity retained per frame (lower = more drag). |
 | **Turbulence** | CUDA TOP | Strength of the sinusoidal flow field. |
 | **Reset** | CUDA TOP (pulse) | Re-seed positions and velocities. |
+| **Auto Reset** | Execute DAT | When on, re-pulses **Reset** every **Reset Period** seconds, so a dispersing cloud (e.g. negative gravity) explodes and reforms on a loop. |
+| **Reset Period (s)** | Execute DAT | Seconds between automatic resets. |
 | **Color Mode** | GLSL (per-particle) | `Single color` (every particle uses **Color**) or `Many colors` (each particle gets its own random hue from a hash of its ID). |
 | **Color** | GLSL `uColor` | Particle color (RGB), used in **Single color** mode. |
 | **Sprite Size** | GLSL `uSprite` | World-space size of each sprite (both modes). |

@@ -235,6 +235,8 @@ def _expose(box, cuda, geo, geo_tri, mat, mat_tri, cam, blur):
     pg.appendFloat('Damping')[0].val                          = DAMPING
     pg.appendFloat('Turbulence')[0].val                       = TURBULENCE
     pg.appendPulse('Reset')
+    pg.appendToggle('Autoreset', label='Auto Reset')
+    pg.appendFloat('Resetperiod', label='Reset Period (s)')[0].val = 4.0
 
     # --- look controls (shared by both render modes) ---
     cm = pg.appendMenu('Colormode', label='Color Mode')
@@ -251,7 +253,8 @@ def _expose(box, cuda, geo, geo_tri, mat, mat_tri, cam, blur):
     # nice slider ranges
     ranges = {'Count': (1024, 2097152), 'Radius': (0.1, 50), 'Speed': (0, 5),
               'Gravity': (-5, 5), 'Swirl': (0, 8), 'Damping': (0.9, 1.0),
-              'Turbulence': (0, 5), 'Spritesize': (0.01, 1.0), 'Glow': (0, 1),
+              'Turbulence': (0, 5), 'Resetperiod': (0.5, 30),
+              'Spritesize': (0.01, 1.0), 'Glow': (0, 1),
               'Camdist': (2, 80), 'Bloom': (0, 30)}
     for nm, (lo, hi) in ranges.items():
         p = getattr(box.par, nm)
@@ -299,6 +302,27 @@ def _expose(box, cuda, geo, geo_tri, mat, mat_tri, cam, blur):
                 "def onPulse(par):\n"
                 "    op('cuda_particles').par.Reset.pulse()\n"
                 "    return\n")
+
+    # Auto-reset: re-pulse Reset every 'Reset Period' seconds while Auto Reset
+    # is on, so a dispersing cloud (e.g. negative gravity) explodes and reforms
+    # on a loop. absTime-based, so it tracks wall-clock rather than frame count.
+    box.store('lastreset', absTime.seconds)
+    aex = box.create(executeDAT, 'autoreset_exec')
+    aex.nodeX, aex.nodeY = 250, 400
+    _set_first(aex, ['framestart', 'frame'], True, 'enable onFrameStart')
+    aex.text = (
+        "def onFrameStart(frame):\n"
+        "    b = op('..')\n"
+        "    try:\n"
+        "        if not b.par.Autoreset.eval():\n"
+        "            return\n"
+        "        period = max(0.1, b.par.Resetperiod.eval())\n"
+        "        if absTime.seconds - b.fetch('lastreset', 0.0) >= period:\n"
+        "            b.par.Reset.pulse()\n"
+        "            b.store('lastreset', absTime.seconds)\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    return\n")
 
 
 def build():
