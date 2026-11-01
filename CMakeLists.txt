@@ -49,11 +49,18 @@ set_target_properties(ParticleDensityTOP PROPERTIES
 target_compile_options(ParticleDensityTOP PRIVATE ${TDCUDA_CUDA_FLAGS})
 
 # --- ParticleSurfaceSOP: marching tetrahedra -> welded mesh (plain C++) ----
-add_library(ParticleSurfaceSOP SHARED ParticleSurfaceSOP.cpp)
-target_include_directories(ParticleSurfaceSOP PRIVATE ${TD_SOP_INCLUDE} ${CMAKE_SOURCE_DIR})
-set_target_properties(ParticleSurfaceSOP PROPERTIES
-    PREFIX ""
-    SUFFIX ".dll")
+# Only built when the SOP API headers are found, so a configure that points
+# solely at TOP headers still builds the two TOPs instead of failing outright.
+if(EXISTS "${TD_SOP_INCLUDE}/SOP_CPlusPlusBase.h")
+    add_library(ParticleSurfaceSOP SHARED ParticleSurfaceSOP.cpp)
+    target_include_directories(ParticleSurfaceSOP PRIVATE ${TD_SOP_INCLUDE} ${CMAKE_SOURCE_DIR})
+    set_target_properties(ParticleSurfaceSOP PROPERTIES
+        PREFIX ""
+        SUFFIX ".dll")
+else()
+    message(WARNING "SOP_CPlusPlusBase.h not found in TD_SOP_INCLUDE='${TD_SOP_INCLUDE}' "
+                    "-- skipping ParticleSurfaceSOP. Pass -DTD_SOP_INCLUDE=<SOP sample dir>.")
+endif()
 
 # Build:
 #   cmake -B build -A x64 -DTD_INCLUDE="..." [-DTD_SOP_INCLUDE="..."]
